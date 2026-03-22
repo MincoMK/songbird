@@ -23,6 +23,9 @@ pub enum CoreMessage {
     Reconnect,
     FullReconnect,
     RebuildInterconnect,
+
+    PlayDirectOpus(ringbuf::HeapCons<bytes::Bytes>),
+
     Poison,
 }
 

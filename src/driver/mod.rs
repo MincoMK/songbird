@@ -31,12 +31,8 @@ pub(crate) use crypto::CryptoState;
 pub use decode_mode::*;
 pub use mix_mode::MixMode;
 pub use scheduler::{
-    get_default_scheduler,
-    Config as SchedulerConfig,
-    Error as SchedulerError,
-    LiveStatBlock,
-    Mode as SchedulerMode,
-    Scheduler,
+    get_default_scheduler, Config as SchedulerConfig, Error as SchedulerError, LiveStatBlock,
+    Mode as SchedulerMode, Scheduler,
 };
 #[cfg(test)]
 pub use test_config::*;
@@ -49,10 +45,7 @@ use crate::{
     events::EventData,
     input::Input,
     tracks::{Track, TrackHandle},
-    Config,
-    ConnectionInfo,
-    Event,
-    EventHandler,
+    Config, ConnectionInfo, Event, EventHandler,
 };
 /// Opus encoder bitrate settings.
 pub use audiopus::{self as opus, Bitrate};
@@ -104,6 +97,15 @@ impl Driver {
             #[cfg(feature = "builtin-queue")]
             queue: Some(TrackQueue::default()),
         }
+    }
+
+    /// Plays a stream of raw Opus frames directly to Discord.
+    ///
+    /// This bypasses the mixer and the encoder, sending the provided frames
+    /// directly in RTP packets. Exactly one frame is pulled from the consumer
+    /// every 20ms.
+    pub fn play_direct_opus(&self, rx: ringbuf::HeapCons<bytes::Bytes>) {
+        drop(self.sender.send(CoreMessage::PlayDirectOpus(rx)));
     }
 
     fn start_inner(config: Config) -> Sender<CoreMessage> {

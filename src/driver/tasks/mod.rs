@@ -216,6 +216,9 @@ async fn runner(mut config: Config, rx: Receiver<CoreMessage>, tx: Sender<CoreMe
             CoreMessage::RebuildInterconnect => {
                 interconnect.restart_volatile_internals();
             },
+            CoreMessage::PlayDirectOpus(rx) => {
+                drop(interconnect.mixer.send(MixerMessage::PlayDirectOpus(rx)));
+            },
             CoreMessage::Poison => break,
         }
     }

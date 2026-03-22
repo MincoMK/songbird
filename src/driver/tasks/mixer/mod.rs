@@ -24,10 +24,7 @@ use crate::{
     Config,
 };
 use audiopus::{
-    coder::Encoder as OpusEncoder,
-    softclip::SoftClip,
-    Application as CodingMode,
-    Bitrate,
+    coder::Encoder as OpusEncoder, softclip::SoftClip, Application as CodingMode, Bitrate,
 };
 use discortp::{
     discord::MutableKeepalivePacket,
@@ -36,11 +33,12 @@ use discortp::{
 };
 use flume::{Receiver, SendError, Sender, TryRecvError};
 use rand::random;
+use ringbuf::traits::Consumer;
 use rubato::{FftFixedOut, Resampler};
 use std::{
     io::Write,
     result::Result as StdResult,
-    sync::Arc,
+    sync::{atomic::Ordering, Arc},
     time::{Duration, Instant},
 };
 use symphonia_core::{
@@ -75,6 +73,8 @@ pub struct Mixer {
     pub soft_clip: SoftClip,
     thread_pool: BlockyTaskPool,
     pub ws: Option<Sender<WsMessage>>,
+
+    pub direct_opus: Option<ringbuf::HeapCons<bytes::Bytes>>,
 
     pub keepalive_deadline: Instant,
     pub keepalive_packet: [u8; MutableKeepalivePacket::minimum_packet_size()],
@@ -161,6 +161,8 @@ impl Mixer {
             soft_clip,
             thread_pool,
             ws: None,
+
+            direct_opus: None,
 
             keepalive_deadline: deadline,
             keepalive_packet,
@@ -329,10 +331,11 @@ impl Mixer {
 
                 #[cfg(feature = "receive")]
                 if let Some(conn) = &self.conn_active {
-                    conn_failure |= conn
-                        .udp_rx
-                        .send(UdpRxMessage::SetConfig(new_config))
-                        .is_err();
+                    if let crate::driver::DecodeMode::Decode(decode_config) = new_config.decode_mode
+                    {
+                        let msg = UdpRxMessage::SetConfig(decode_config);
+                        conn_failure |= conn.udp_rx.send(msg).is_err();
+                    }
                 }
 
                 Ok(())
@@ -349,6 +352,13 @@ impl Mixer {
                         .expect("Failed fallback rebuild of OpusEncoder with safe inputs.");
                     Ok(())
                 },
+            },
+            MixerMessage::PlayDirectOpus(rx) => {
+                self.direct_opus = Some(rx);
+                if let Err(e) = self.send_gateway_speaking() {
+                    conn_failure |= e.should_trigger_connect();
+                }
+                Ok(())
             },
             MixerMessage::Ws(new_ws_handle) => {
                 self.ws = new_ws_handle;
@@ -503,10 +513,12 @@ impl Mixer {
     #[inline]
     pub(crate) fn test_signal_empty_tick(&self) {
         match &self.config.override_connection {
-            Some(OutputMode::Raw(tx)) =>
-                drop(tx.send(crate::driver::test_config::TickMessage::NoEl)),
-            Some(OutputMode::Rtp(tx)) =>
-                drop(tx.send(crate::driver::test_config::TickMessage::NoEl)),
+            Some(OutputMode::Raw(tx)) => {
+                drop(tx.send(crate::driver::test_config::TickMessage::NoEl))
+            },
+            Some(OutputMode::Rtp(tx)) => {
+                drop(tx.send(crate::driver::test_config::TickMessage::NoEl))
+            },
             None => {},
         }
     }
@@ -522,6 +534,29 @@ impl Mixer {
 
     #[inline]
     pub fn mix_and_build_packet(&mut self, packet: &mut [u8]) -> Result<usize> {
+        println!("mix_and_build_packet called");
+        if let Some(ref mut rx) = self.direct_opus {
+            println!("checking direct_opus");
+            if let Some(frame) = rx.try_pop() {
+                println!("popped frame of len {}", frame.len());
+
+                let frame: bytes::Bytes = frame;
+                let mut rtp = MutableRtpPacket::new(packet).expect(
+                    "FATAL: Too few bytes in self.packet for RTP header.\
+                        (Blame: VOICE_PACKET_MAX?)",
+                );
+
+                let payload = rtp.payload_mut();
+                let pre_len = self.crypto_mode().payload_prefix_len();
+
+                payload[pre_len..pre_len + frame.len()].copy_from_slice(&frame);
+
+                return self.prep_packet(MixType::Passthrough(frame.len()), packet);
+            } else {
+                println!("pop fail");
+            }
+        }
+
         // symph_mix is an `AudioBuffer` (planar format), we need to convert this
         // later into an interleaved `SampleBuffer` for libopus.
         self.symph_mix.clear();
@@ -638,19 +673,33 @@ impl Mixer {
         let payload = rtp.payload_mut();
         let crypto_mode = conn.crypto_state.kind();
         let first_payload_byte = crypto_mode.payload_prefix_len();
+        let total_payload_space = payload.len() - crypto_mode.payload_suffix_len();
 
         // If passthrough, Opus payload in place already.
         // Else encode into buffer with space for AEAD encryption headers.
-        let payload_len = match mix_len {
+        let mut payload_len = match mix_len {
             MixType::Passthrough(opus_len) => opus_len,
-            MixType::MixedPcm(_samples) => {
-                let total_payload_space = payload.len() - crypto_mode.payload_suffix_len();
-                self.encoder.encode_float(
-                    &send_buffer[..self.config.mix_mode.sample_count_in_frame()],
-                    &mut payload[first_payload_byte..total_payload_space],
-                )?
-            },
+            MixType::MixedPcm(_samples) => self.encoder.encode_float(
+                &send_buffer[..self.config.mix_mode.sample_count_in_frame()],
+                &mut payload[first_payload_byte..total_payload_space],
+            )?,
         };
+
+        if conn.dave_protocol_version.load(Ordering::Relaxed) != 0 {
+            if let Some(ref mut dave_session) = *conn.dave_session.blocking_write() {
+                if dave_session.is_ready() {
+                    let encrypted = dave_session
+                        .encrypt_opus(
+                            &payload[first_payload_byte..first_payload_byte + payload_len],
+                        )?
+                        .into_owned();
+                    payload_len = encrypted.len();
+
+                    payload[first_payload_byte..first_payload_byte + payload_len]
+                        .copy_from_slice(&encrypted);
+                }
+            }
+        }
 
         let final_payload_size = conn
             .crypto_state
@@ -848,8 +897,9 @@ impl Mixer {
             // to recreate? Probably not doable in the general case.
             match status {
                 MixStatus::Live => track.step_frame(),
-                MixStatus::Errored(e) =>
-                    track.playing = PlayMode::Errored(PlayError::Decode(e.into())),
+                MixStatus::Errored(e) => {
+                    track.playing = PlayMode::Errored(PlayError::Decode(e.into()))
+                },
                 MixStatus::Ended if track.do_loop() => {
                     drop(self.track_handles[i].seek(Duration::default()));
                     if !self.prevent_events {

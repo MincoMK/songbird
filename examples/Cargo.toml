@@ -4,6 +4,7 @@ members = [
     "serenity/voice_cached_audio",
     "serenity/voice_events_queue",
     "serenity/voice_receive",
+    "serenity/voice_direct_opus",
     "twilight",
 ]
 resolver = "2"
