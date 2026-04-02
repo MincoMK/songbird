@@ -51,7 +51,10 @@ impl MixerMessage {
     pub fn is_mixer_maybe_live(&self) -> bool {
         matches!(
             self,
-            Self::AddTrack(_) | Self::SetTrack(Some(_)) | Self::SetConn(..)
+            Self::AddTrack(_)
+                | Self::SetTrack(Some(_))
+                | Self::SetConn(..)
+                | Self::PlayDirectOpus(_)
         )
     }
 }

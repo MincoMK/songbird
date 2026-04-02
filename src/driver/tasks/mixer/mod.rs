@@ -532,14 +532,14 @@ impl Mixer {
         }
     }
 
+    pub fn has_audio_sources(&self) -> bool {
+        !self.tracks.is_empty() || self.direct_opus.is_some()
+    }
+
     #[inline]
     pub fn mix_and_build_packet(&mut self, packet: &mut [u8]) -> Result<usize> {
-        println!("mix_and_build_packet called");
         if let Some(ref mut rx) = self.direct_opus {
-            println!("checking direct_opus");
             if let Some(frame) = rx.try_pop() {
-                println!("popped frame of len {}", frame.len());
-
                 let frame: bytes::Bytes = frame;
                 let mut rtp = MutableRtpPacket::new(packet).expect(
                     "FATAL: Too few bytes in self.packet for RTP header.\
@@ -552,8 +552,6 @@ impl Mixer {
                 payload[pre_len..pre_len + frame.len()].copy_from_slice(&frame);
 
                 return self.prep_packet(MixType::Passthrough(frame.len()), packet);
-            } else {
-                println!("pop fail");
             }
         }
 

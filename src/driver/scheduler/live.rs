@@ -421,7 +421,7 @@ impl Live {
             assert!(i < self.to_cull.len());
 
             if self.to_cull[i]
-                || (self.tasks[i].tracks.is_empty() && self.tasks[i].silence_frames == 0)
+                || (!self.tasks[i].has_audio_sources() && self.tasks[i].silence_frames == 0)
                 || !(self.tasks[i].conn_active.is_some() || force_conn)
             {
                 self.stats.remove_mixer();

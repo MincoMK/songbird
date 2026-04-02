@@ -1,9 +1,12 @@
+#![allow(deprecated)]
+
 use serenity::client::Context;
 use std::env;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
+use symphonia::default::formats::OggReader;
+use symphonia_core::formats::FormatReader;
 
 use bytes::Bytes;
 use ringbuf::traits::{Producer, Split};
@@ -15,9 +18,7 @@ use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::prelude::*;
 use songbird::SerenityInit;
-use symphonia::core::formats::{FormatReader, Packet};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::probe::Hint;
 
 struct Handler;
 
@@ -141,7 +142,7 @@ async fn play_direct(ctx: &Context, msg: &Message, mut args: Args) -> CommandRes
         .clone();
 
     if let Some(handler_lock) = manager.get(guild_id) {
-        let mut handler = handler_lock.lock().await;
+        let handler = handler_lock.lock().await;
 
         // 1. Create the ringbuffer
         let (mut prod, cons) = HeapRb::<Bytes>::new(100).split();
@@ -173,31 +174,17 @@ async fn feeder_task(
     let file = File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
-    let mut hint = Hint::new();
-    hint.with_extension("ogg");
-
-    let probed = symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &Default::default(),
-        &Default::default(),
-    )?;
-
-    let mut format = probed.format;
+    let mut reader = OggReader::try_new(mss, &Default::default())?;
 
     // Find the first Opus track
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_OPUS)
-        .ok_or("No Opus track found")?;
-
+    /*
+    let track = reader.default_track().ok_or("No Opus track found")?;
     let track_id = track.id;
-
     println!("Starting playback of Opus track {}", track_id);
+    */
 
     loop {
-        let packet = match format.next_packet() {
+        let packet = match reader.next_packet() {
             Ok(packet) => packet,
             Err(symphonia::core::errors::Error::IoError(ref e))
                 if e.kind() == std::io::ErrorKind::UnexpectedEof =>
@@ -207,63 +194,21 @@ async fn feeder_task(
             Err(e) => return Err(e.into()),
         };
 
+        /*
         if packet.track_id() != track_id {
             continue;
         }
+        */
 
         let data = Bytes::copy_from_slice(&packet.data);
 
         // Push to ringbuffer, sleep if full
-        while let Err(returned_data) = prod.try_push(data.clone()) {
+        while let Err(_returned_data) = prod.try_push(data.clone()) {
             tokio::time::sleep(Duration::from_millis(5)).await;
             // In a real app, you might want a way to cancel this loop if the driver stops
         }
     }
 
     println!("Finished feeding Opus frames");
-    Ok(())
-}
-
-// Manual packet feeder since we need some helper types
-async fn feeder_task_impl(
-    path: String,
-    prod: &mut ringbuf::HeapProd<Bytes>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let file = File::open(path)?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let probed = symphonia::default::get_probe().format(
-        &Hint::new(),
-        mss,
-        &Default::default(),
-        &Default::default(),
-    )?;
-
-    let mut format = probed.format;
-    let track_id = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec == symphonia::core::codecs::CODEC_TYPE_OPUS)
-        .map(|t| t.id)
-        .ok_or("No Opus track")?;
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(symphonia::core::errors::Error::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break
-            },
-            Err(e) => return Err(e.into()),
-        };
-
-        if packet.track_id() == track_id {
-            let data = Bytes::copy_from_slice(&packet.data);
-            while let Err(_) = prod.try_push(data.clone()) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-    }
     Ok(())
 }

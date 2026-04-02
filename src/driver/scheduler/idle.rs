@@ -89,7 +89,7 @@ impl Idle {
                     if let Some(task) = self.tasks.get_mut(&id) {
                         match task.handle_message(mix_msg) {
                             Ok(false) if maybe_live => {
-                                if task.mixer.tracks.is_empty() {
+                                if !task.mixer.has_audio_sources() {
                                     // No tracks, likely due to SetConn.
                                     // Recreate message forwarding task.
                                     task.spawn_forwarder(self.tx.clone(), id);

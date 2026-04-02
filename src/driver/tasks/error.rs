@@ -18,6 +18,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 #[non_exhaustive]
+#[allow(dead_code)]
 pub enum Error {
     Crypto(CryptoError),
     DaveEncrypt(davey::errors::EncryptError),
@@ -110,6 +111,7 @@ impl From<WsError> for Error {
 
 #[derive(Debug)]
 #[non_exhaustive]
+#[allow(dead_code)]
 pub enum DaveReinitError {
     Init(davey::errors::InitError),
     Reinit(davey::errors::ReinitError),
